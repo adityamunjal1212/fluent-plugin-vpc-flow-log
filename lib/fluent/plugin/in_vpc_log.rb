@@ -7,21 +7,22 @@ require 'fluent/input'
 require 'digest/sha1'
 
 class Fluent::Plugin::Elb_LogInput < Fluent::Plugin::Input
-  Fluent::Plugin.register_input('elb_log', self)
+  Fluent::Plugin.register_input('vpc_log', self)
 
   helpers :timer
 
-  LOGFILE_REGEXP = /^((?<prefix>.+?)\/|)AWSLogs\/(?<account_id>[0-9]{12})\/elasticloadbalancing\/(?<region>.+?)\/(?<logfile_date>[0-9]{4}\/[0-9]{2}\/[0-9]{2})\/[0-9]{12}_elasticloadbalancing_.+?_(?<logfile_elb_name>[^_]+)_(?<elb_timestamp>[0-9]{8}T[0-9]{4}Z)_(?<elb_ip_address>.+?)_(?<logfile_hash>.+)\.log(.gz)?$/
-  ACCESSLOG_REGEXP = /^((?<type>[a-z0-9]+) )?(?<time>\d{4}-\d{2}-\d{2}T\d{2}\:\d{2}\:\d{2}\.\d{6}Z) (?<elb>.+?) (?<client>[^ ]+)\:(?<client_port>.+?) (?<backend>.+?)(\:(?<backend_port>.+?))? (?<request_processing_time>.+?) (?<backend_processing_time>.+?) (?<response_processing_time>.+?) (?<elb_status_code>.+?) (?<backend_status_code>.+?) (?<received_bytes>.+?) (?<sent_bytes>.+?) \"(?<request_method>.+?) (?<request_uri>.+?) (?<request_protocol>.+?)\"(\s+\"(?<user_agent>.+?)\" (?<ssl_cipher>.+?) (?<ssl_protocol>[^\s]+)( (?<target_group_arn>arn:\S+) (?<trace_id>[^\s]+))?( \"(?<domain_name>.+?)\" \"(?<chosen_cert_arn>.+?)\" (?<matched_rule_priority>.+?) (?<request_creation_time>.+?) \"(?<actions_executed>.+?)\" \"(?<redirect_url>.+?)\" \"(?<error_reason>[^\s]+)\"( |$))?((?<option1>[^\s]+)( |$))?((?<option2>[^\s]+)( |$))?( (?<option3>.*))?)?/
+  LOGFILE_REGEXP = /^AWSLogs\/(?<account_id>[0-9]{12})\/vpcflowlogs\/(?<region>.+?)\/(?<logfile_date>[0-9]{4}\/[0-9]{2}\/[0-9]{2})\/[0-9]{12}_vpcflowlogs_.+?_(?<logfile_vpc_name>[^_]+)_(?<vpc_timestamp>[0-9]{8}T[0-9]{4}Z)_(?<logfile_hash>.+)\.log(.gz)?$/
+
+  ACCESSLOG_REGEXP = /^(?<version>[^ ]*) (?<account_id>[^ ]*) (?<interface_id>[^ ]*) (?<srcaddr>[^ ]*) (?<dstaddr>[^ ]*) (?<srcport>[^ ]*) (?<dstport>[^ ]*) (?<protocol>[^ ]*) (?<packets>[^ ]*) (?<bytes>[^ ]*) (?<start>[^ ]*) (?<end>[^ ]*) (?<action>[^ ]*) (?<log_status>[A-Za-z]*)/
   config_param :access_key_id, :string, default: nil, secret: true
   config_param :secret_access_key, :string, default: nil, secret: true
   config_param :region, :string
   config_param :s3_bucketname, :string, default: nil
   config_param :s3_prefix, :string, default: nil
-  config_param :tag, :string, default: 'elb.access'
+  config_param :tag, :string, default: 'vpc.access'
   config_param :timestamp_file, :string, default: nil
   config_param :refresh_interval, :integer, default: 300
-  config_param :buf_file, :string, default: './fluentd_elb_log_buf_file'
+  config_param :buf_file, :string, default: './fluentd_vpc_log_buf_file'
   config_param :http_proxy, :string, default: nil
   config_param :start_time, :string, default: nil
   config_param :delete, :bool, default: false
@@ -48,7 +49,7 @@ class Fluent::Plugin::Elb_LogInput < Fluent::Plugin::Input
     File.open(@timestamp_file, File::RDWR|File::CREAT).close
     File.open(@buf_file, File::RDWR|File::CREAT).close
 
-    timer_execute(:in_elb_log, @refresh_interval, &method(:input))
+    timer_execute(:in_vpc_log, @refresh_interval, &method(:input))
   end
 
   private
@@ -140,13 +141,13 @@ class Fluent::Plugin::Elb_LogInput < Fluent::Plugin::Input
           "account_id" => object_key[:account_id],
           "region" => object_key[:region],
           "logfile_date" => object_key[:logfile_date],
-          "logfile_elb_name" => object_key[:logfile_elb_name],
-          "elb_ip_address" => object_key[:elb_ip_address],
+          "logfile_vpc_name" => object_key[:logfile_vpc_name],
+          "vpc_ip_address" => object_key[:vpc_ip_address],
           "logfile_hash" => object_key[:logfile_hash],
-          "elb_timestamp" => object_key[:elb_timestamp],
+          "vpc_timestamp" => object_key[:vpc_timestamp],
           "key" => object_key[:key],
           "prefix" => object_key[:prefix],
-          "elb_timestamp_unixtime" => object_key[:elb_timestamp_unixtime],
+          "vpc_timestamp_unixtime" => object_key[:vpc_timestamp_unixtime],
           "s3_last_modified_unixtime" => object_key[:s3_last_modified_unixtime],
         }
 
@@ -206,11 +207,11 @@ class Fluent::Plugin::Elb_LogInput < Fluent::Plugin::Input
             account_id: matches[:account_id],
             region: matches[:region],
             logfile_date: matches[:logfile_date],
-            logfile_elb_name: matches[:logfile_elb_name],
-            elb_timestamp: matches[:elb_timestamp],
-            elb_ip_address: matches[:elb_ip_address],
+            logfile_vpc_name: matches[:logfile_vpc_name],
+            vpc_timestamp: matches[:vpc_timestamp],
+            vpc_ip_address: matches[:vpc_ip_address],
             logfile_hash: matches[:logfile_hash],
-            elb_timestamp_unixtime: Time.parse(matches[:elb_timestamp]).to_i,
+            vpc_timestamp_unixtime: Time.parse(matches[:vpc_timestamp]).to_i,
             s3_last_modified_unixtime: s3_last_modified_unixtime,
           }
         end
@@ -250,7 +251,7 @@ class Fluent::Plugin::Elb_LogInput < Fluent::Plugin::Input
     begin
       log.debug "getting object from s3 name is #{object_name}"
 
-      Tempfile.create('fluent-elblog') do |tfile|
+      Tempfile.create('fluent-vpclog') do |tfile|
         s3_client.get_object(bucket: @s3_bucketname, key: object_name, response_target: tfile.path)
 
         if File.extname(object_name) != '.gz'
@@ -305,7 +306,7 @@ class Fluent::Plugin::Elb_LogInput < Fluent::Plugin::Input
 
   def format_record(item)
     { "time" => item[:time].gsub(/Z/, '+0000'),
-      "elb" => item[:elb],
+      "vpc" => item[:vpc],
       "client" => item[:client],
       "client_port" => item[:client_port],
       "backend" => item[:backend],
@@ -313,7 +314,7 @@ class Fluent::Plugin::Elb_LogInput < Fluent::Plugin::Input
       "request_processing_time" => item[:request_processing_time].to_f,
       "backend_processing_time" => item[:backend_processing_time].to_f,
       "response_processing_time" => item[:response_processing_time].to_f,
-      "elb_status_code" => item[:elb_status_code],
+      "vpc_status_code" => item[:vpc_status_code],
       "backend_status_code" => item[:backend_status_code],
       "received_bytes" => item[:received_bytes].to_i,
       "sent_bytes" => item[:sent_bytes].to_i,
